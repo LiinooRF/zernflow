@@ -8,6 +8,7 @@ export interface TriggerNodeProps {
   label?: string;
   triggerType?: string;
   keywords?: Array<{ value: string; matchType: string }>;
+  alsoMatchInDms?: boolean;
 }
 
 const triggerLabels: Record<string, string> = {
@@ -36,7 +37,14 @@ export function TriggerNode({ data, selected }: NodeProps) {
         <span className="text-xs font-semibold">Trigger</span>
       </div>
       <div className="p-3">
-        <p className="text-sm font-medium">{label}</p>
+        <div className="flex items-center gap-1.5">
+          <p className="text-sm font-medium">{label}</p>
+          {triggerType === "comment_keyword" && nodeData.alsoMatchInDms === true && (
+            <span className="rounded-sm bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+              Also in DMs
+            </span>
+          )}
+        </div>
         {nodeData.keywords && nodeData.keywords.length > 0 && (
           <p className="mt-1 text-xs text-muted-foreground">
             Keywords:{" "}

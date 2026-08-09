@@ -14,6 +14,7 @@ interface TriggerPanelData {
   triggerType?: string;
   keywords?: Keyword[];
   payload?: string;
+  alsoMatchInDms?: boolean;
   [key: string]: unknown;
 }
 
@@ -196,6 +197,34 @@ export function TriggerPanel({ data: rawData, onChange }: TriggerPanelProps) {
             <p className="mt-2 text-xs text-muted-foreground">
               Add keywords that will trigger this flow. Press Enter or click + to add.
             </p>
+          )}
+
+          {/* Comment keywords only: publish also writes a `keyword` trigger row so
+              the same flow answers people who DM the keyword instead of commenting. */}
+          {triggerType === "comment_keyword" && (
+            <label className="mt-3 flex cursor-pointer items-start gap-2.5 rounded-lg border border-border bg-card p-3">
+              <input
+                type="checkbox"
+                checked={data.alsoMatchInDms === true}
+                onChange={(e) => onChange({ ...data, alsoMatchInDms: e.target.checked })}
+                disabled={keywords.length === 0}
+                className="mt-0.5 h-4 w-4 rounded border-input text-emerald-500 focus:ring-emerald-500 disabled:opacity-40"
+              />
+              <div>
+                <p className="text-sm font-medium text-foreground">Also match in DMs</p>
+                <p className="text-xs text-muted-foreground">
+                  {keywords.length === 0
+                    ? "Add at least one keyword to use this."
+                    : "Run this flow when someone sends a keyword as a direct message, not just as a comment."}
+                </p>
+                {data.alsoMatchInDms === true && (
+                  <p className="mt-1.5 text-xs text-muted-foreground">
+                    A DM has no comment behind it, so public replies and the comment
+                    variables ({"{{comment_text}}"}, {"{{post_id}}"}) are empty on that run.
+                  </p>
+                )}
+              </div>
+            </label>
           )}
         </div>
       )}
