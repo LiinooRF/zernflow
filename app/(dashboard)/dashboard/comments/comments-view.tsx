@@ -4,15 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import {
-  AlertTriangle,
-  EyeOff,
-  Eye,
-  ExternalLink,
-  MessageSquare,
-  RefreshCw,
-  Send,
-} from "lucide-react";
+import { EyeOff, Eye, ExternalLink, MessageSquare, RefreshCw, Send } from "lucide-react";
 import { PlatformIcon } from "@/components/platform-icon";
 import {
   privateReplyAction,
@@ -25,14 +17,14 @@ interface Props {
   items: CommentItem[];
   workspaces: Array<{ id: string; name: string }>;
   accounts: Array<{ id: string; username: string; platform: string }>;
-  errors: string[];
+  lastSyncedAt: string | null;
 }
 
 type ReplyMode = "public" | "private";
 
-function timeAgo(iso: string) {
-  const diff = Date.now() - new Date(iso).getTime();
-  const minutes = Math.floor(diff / 60000);
+function timeAgo(iso: string | null) {
+  if (!iso) return "";
+  const minutes = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
   if (minutes < 1) return "just now";
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
@@ -40,22 +32,18 @@ function timeAgo(iso: string) {
   return `${Math.floor(hours / 24)}d`;
 }
 
-/**
- * Zernio serves this data from a cache and rate-limits to 60 requests/minute
- * per key, and one board refresh costs one request per workspace plus one per
- * post that has comments. Polling every few seconds would burn the budget on
- * identical bytes, so the fast path is the push below and this is only the
- * safety net for anything the webhook misses.
- */
+/** The board reads Postgres now, so refreshing is cheap; this is just a floor
+ *  under the live subscription in case the socket drops. */
 const POLL_MS = 60_000;
-/** New comments usually arrive in bursts; refetch once when the burst settles. */
-const PUSH_DEBOUNCE_MS = 3_000;
+/** Comments arrive in bursts; re-read once the burst settles. */
+const PUSH_DEBOUNCE_MS = 2_000;
 
-export function CommentsView({ items, workspaces, accounts, errors }: Props) {
+export function CommentsView({ items, workspaces, accounts, lastSyncedAt }: Props) {
   const router = useRouter();
   const [workspaceFilter, setWorkspaceFilter] = useState("all");
   const [accountFilter, setAccountFilter] = useState("all");
   const [onlyUnanswered, setOnlyUnanswered] = useState(true);
+  const [sourceFilter, setSourceFilter] = useState<"all" | "organic" | "ad">("all");
   const [refreshing, startRefresh] = useTransition();
   const [live, setLive] = useState(false);
   const [pushed, setPushed] = useState(0);
@@ -65,9 +53,9 @@ export function CommentsView({ items, workspaces, accounts, errors }: Props) {
     startRefresh(() => router.refresh());
   }, [router]);
 
-  // Push: Zernio's comment.received webhook writes into comment_logs, which is
-  // in the supabase_realtime publication, so a new comment reaches the browser
-  // as it lands instead of on the next poll.
+  // Zernio's comment.received webhook writes comment_logs, which is in the
+  // supabase_realtime publication, so a new comment reaches the browser as it
+  // lands rather than on the next sweep.
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     const supabase = createClient();
@@ -90,8 +78,6 @@ export function CommentsView({ items, workspaces, accounts, errors }: Props) {
     };
   }, [router]);
 
-  // Safety net. Paused while the tab is hidden so a forgotten tab does not eat
-  // the rate limit all afternoon.
   useEffect(() => {
     const timer = setInterval(() => {
       if (document.visibilityState === "visible") router.refresh();
@@ -104,13 +90,22 @@ export function CommentsView({ items, workspaces, accounts, errors }: Props) {
       items.filter((item) => {
         if (workspaceFilter !== "all" && item.workspaceId !== workspaceFilter) return false;
         if (accountFilter !== "all" && item.accountId !== accountFilter) return false;
-        if (onlyUnanswered && item.comment.replyCount > 0) return false;
+        if (sourceFilter !== "all" && item.source !== sourceFilter) return false;
+        if (onlyUnanswered && item.replyCount > 0) return false;
         return true;
       }),
-    [items, workspaceFilter, accountFilter, onlyUnanswered],
+    [items, workspaceFilter, accountFilter, onlyUnanswered, sourceFilter],
   );
 
-  const unanswered = items.filter((item) => item.comment.replyCount === 0).length;
+  const unanswered = items.filter((item) => item.replyCount === 0).length;
+  // What an agency actually gets judged on: how long the oldest unanswered
+  // comment has been sitting there.
+  const oldest = items
+    .filter((i) => i.replyCount === 0 && i.createdAt)
+    .reduce<string | null>(
+      (acc, i) => (!acc || (i.createdAt as string) < acc ? (i.createdAt as string) : acc),
+      null,
+    );
 
   return (
     <div className="p-6">
@@ -119,6 +114,12 @@ export function CommentsView({ items, workspaces, accounts, errors }: Props) {
           <h1 className="text-2xl font-bold">Comments</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Every comment across all your clients&apos; accounts, newest first.
+            {oldest && (
+              <>
+                {" "}
+                Oldest unanswered: <strong>{timeAgo(oldest)}</strong>.
+              </>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -126,8 +127,8 @@ export function CommentsView({ items, workspaces, accounts, errors }: Props) {
             className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
             title={
               live
-                ? "New comments arrive as Zernio pushes them"
-                : "Live updates unavailable - falling back to a refresh every minute"
+                ? "New comments appear as they arrive"
+                : "Live updates unavailable - refreshing every minute instead"
             }
           >
             <span
@@ -185,6 +186,16 @@ export function CommentsView({ items, workspaces, accounts, errors }: Props) {
           ))}
         </select>
 
+        <select
+          value={sourceFilter}
+          onChange={(e) => setSourceFilter(e.target.value as "all" | "organic" | "ad")}
+          className="rounded-lg border border-border bg-background px-3 py-2 text-sm"
+        >
+          <option value="all">Organic + ads ({items.length})</option>
+          <option value="organic">Organic only ({items.filter((i) => i.source === "organic").length})</option>
+          <option value="ad">Ads only ({items.filter((i) => i.source === "ad").length})</option>
+        </select>
+
         <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
           <input
             type="checkbox"
@@ -197,22 +208,9 @@ export function CommentsView({ items, workspaces, accounts, errors }: Props) {
 
         <span className="ml-auto text-sm text-muted-foreground">
           {visible.length} shown
+          {lastSyncedAt && ` · synced ${timeAgo(lastSyncedAt)} ago`}
         </span>
       </div>
-
-      {errors.length > 0 && (
-        <div className="mt-4 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
-          <p className="flex items-center gap-2 font-medium">
-            <AlertTriangle className="h-4 w-4" />
-            Some accounts could not be read
-          </p>
-          <ul className="mt-2 list-inside list-disc space-y-1">
-            {errors.map((error) => (
-              <li key={error}>{error}</li>
-            ))}
-          </ul>
-        </div>
-      )}
 
       {visible.length === 0 ? (
         <div className="mt-8 rounded-xl border border-dashed border-border p-10 text-center">
@@ -227,7 +225,7 @@ export function CommentsView({ items, workspaces, accounts, errors }: Props) {
       ) : (
         <div className="mt-4 space-y-3">
           {visible.map((item) => (
-            <CommentCard key={`${item.post.id}-${item.comment.id}`} item={item} />
+            <CommentCard key={item.id} item={item} />
           ))}
         </div>
       )}
@@ -237,23 +235,30 @@ export function CommentsView({ items, workspaces, accounts, errors }: Props) {
 
 function CommentCard({ item }: { item: CommentItem }) {
   const router = useRouter();
-  const { comment, post } = item;
   const [mode, setMode] = useState<ReplyMode | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
+  const canDm = item.platform === "instagram" || item.platform === "facebook";
+
   function submit() {
     setError(null);
+    if (!item.accountId) {
+      setError("This comment has no account yet - wait for the next sync");
+      return;
+    }
     const action = mode === "private" ? privateReplyAction : replyToCommentAction;
+    const accountId = item.accountId;
 
     startTransition(async () => {
       const result = await action({
+        rowId: item.id,
         workspaceId: item.workspaceId,
-        postId: post.id,
-        commentId: comment.id,
-        accountId: item.accountId,
+        postId: item.postId,
+        commentId: item.commentId,
+        accountId,
         message,
       });
 
@@ -271,13 +276,16 @@ function CommentCard({ item }: { item: CommentItem }) {
 
   function toggleHidden() {
     setError(null);
+    if (!item.accountId) return;
+    const accountId = item.accountId;
     startTransition(async () => {
       const result = await toggleHiddenAction({
+        rowId: item.id,
         workspaceId: item.workspaceId,
-        postId: post.id,
-        commentId: comment.id,
-        accountId: item.accountId,
-        hidden: !comment.isHidden,
+        postId: item.postId,
+        commentId: item.commentId,
+        accountId,
+        hidden: !item.isHidden,
       });
       if (result.error) setError(result.error);
       else router.refresh();
@@ -287,9 +295,9 @@ function CommentCard({ item }: { item: CommentItem }) {
   return (
     <div className="rounded-xl border border-border p-4">
       <div className="flex items-start gap-3">
-        {post.picture ? (
+        {item.postPicture ? (
           <Image
-            src={post.picture}
+            src={item.postPicture}
             alt=""
             width={48}
             height={48}
@@ -302,18 +310,29 @@ function CommentCard({ item }: { item: CommentItem }) {
 
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <PlatformIcon platform={post.platform} className="h-3.5 w-3.5" />
-            <span className="font-medium text-foreground">@{item.accountUsername}</span>
+            <PlatformIcon platform={item.platform} className="h-3.5 w-3.5" />
+            {item.accountUsername && (
+              <span className="font-medium text-foreground">@{item.accountUsername}</span>
+            )}
             <span>·</span>
             <span>{item.workspaceName}</span>
-            <span>·</span>
-            <span>{timeAgo(comment.createdTime)}</span>
-            {comment.isHidden && (
+            {item.createdAt && (
+              <>
+                <span>·</span>
+                <span>{timeAgo(item.createdAt)}</span>
+              </>
+            )}
+            {item.source === "ad" && (
+              <span className="rounded-full bg-purple-100 px-2 py-0.5 text-[10px] font-medium text-purple-700">
+                Ad
+              </span>
+            )}
+            {item.isHidden && (
               <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium">
                 Hidden
               </span>
             )}
-            {comment.replyCount > 0 && (
+            {item.replyCount > 0 && (
               <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700">
                 Answered
               </span>
@@ -321,21 +340,23 @@ function CommentCard({ item }: { item: CommentItem }) {
           </div>
 
           <p className="mt-2 text-sm font-medium text-foreground">
-            {comment.from?.name || comment.from?.username || "Unknown"}
-            {comment.from?.username && (
+            {item.authorName || item.authorUsername || "Unknown"}
+            {item.authorUsername && (
               <span className="ml-1 font-normal text-muted-foreground">
-                @{comment.from.username}
+                @{item.authorUsername}
               </span>
             )}
           </p>
-          <p className="mt-1 text-sm whitespace-pre-wrap text-foreground">{comment.message}</p>
+          <p className="mt-1 text-sm whitespace-pre-wrap text-foreground">{item.text}</p>
 
-          <p className="mt-2 line-clamp-1 text-xs text-muted-foreground/70">
-            on: {post.content || "(no caption)"}
-          </p>
+          {item.postContent && (
+            <p className="mt-2 line-clamp-1 text-xs text-muted-foreground/70">
+              on: {item.postContent}
+            </p>
+          )}
 
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            {comment.canReply && (
+            {item.canReply && (
               <button
                 onClick={() => setMode(mode === "public" ? null : "public")}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-muted"
@@ -344,7 +365,7 @@ function CommentCard({ item }: { item: CommentItem }) {
                 Reply
               </button>
             )}
-            {(post.platform === "instagram" || post.platform === "facebook") && (
+            {canDm && (
               <button
                 onClick={() => setMode(mode === "private" ? null : "private")}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-muted"
@@ -353,13 +374,13 @@ function CommentCard({ item }: { item: CommentItem }) {
                 Send DM
               </button>
             )}
-            {comment.canHide && (
+            {item.canHide && (
               <button
                 onClick={toggleHidden}
                 disabled={pending}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-muted disabled:opacity-50"
               >
-                {comment.isHidden ? (
+                {item.isHidden ? (
                   <>
                     <Eye className="h-3.5 w-3.5" /> Unhide
                   </>
@@ -370,9 +391,9 @@ function CommentCard({ item }: { item: CommentItem }) {
                 )}
               </button>
             )}
-            {(comment.url || post.permalink) && (
+            {item.postPermalink && (
               <a
-                href={comment.url || post.permalink || "#"}
+                href={item.postPermalink}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-muted"
@@ -425,19 +446,6 @@ function CommentCard({ item }: { item: CommentItem }) {
           )}
 
           {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
-
-          {comment.replies?.length > 0 && (
-            <div className="mt-3 space-y-2 border-l-2 border-border pl-3">
-              {comment.replies.map((reply) => (
-                <div key={reply.id} className="text-xs">
-                  <span className="font-medium text-foreground">
-                    {reply.from?.username || reply.from?.name || "Unknown"}
-                  </span>
-                  <span className="ml-2 text-muted-foreground">{reply.message}</span>
-                </div>
-              ))}
-            </div>
-          )}
         </div>
       </div>
     </div>

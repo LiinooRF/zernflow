@@ -2,27 +2,42 @@
 
 import { createClient } from "@/lib/supabase/server";
 import {
-  getPostComments,
-  listCommentPosts,
   privateReplyToComment,
   replyToComment,
   setCommentHidden,
-  type Comment,
-  type CommentPost,
 } from "@/lib/zernio-comments";
 
-/** Posts scanned per workspace on one load. Comments are only fetched for the
- *  ones that actually have any, so this is the cap on breadth, not on depth. */
-const POSTS_PER_WORKSPACE = 25;
-/** Posts fetched concurrently. Keeps a client with many posts from stalling
- *  the whole board while staying well under Zernio's rate limits. */
-const CONCURRENCY = 5;
+/**
+ * The board reads comment_logs, not Zernio.
+ *
+ * Zernio rate-limits to 60 requests/minute across an account's keys and serves
+ * comments from a cache that does not move for minutes, so querying it per page
+ * load put a hard ceiling on how many clients could have the board open at once
+ * and made every load wait on the network. comment_logs is filled by the
+ * comment.received webhook (instantly) and by /api/cron/comments (the sweep
+ * that catches whatever the webhook missed).
+ */
 
 export interface CommentItem {
-  comment: Comment;
-  post: Pick<CommentPost, "id" | "permalink" | "picture" | "content" | "platform">;
-  accountId: string;
-  accountUsername: string;
+  id: string;
+  commentId: string;
+  text: string;
+  createdAt: string | null;
+  authorName: string | null;
+  authorUsername: string | null;
+  replyCount: number;
+  isHidden: boolean;
+  canReply: boolean;
+  canHide: boolean;
+  postId: string;
+  postPermalink: string | null;
+  postPicture: string | null;
+  postContent: string | null;
+  platform: string;
+  /** "ad" when the comment came from an ad or dark post, not an organic one. */
+  source: "organic" | "ad";
+  accountId: string | null;
+  accountUsername: string | null;
   workspaceId: string;
   workspaceName: string;
 }
@@ -31,179 +46,129 @@ export interface CommentsBoard {
   items: CommentItem[];
   workspaces: Array<{ id: string; name: string }>;
   accounts: Array<{ id: string; username: string; platform: string }>;
-  errors: string[];
+  /** Oldest sync across the rows shown, so the UI can admit how fresh it is. */
+  lastSyncedAt: string | null;
 }
 
-interface WorkspaceWithKey {
-  id: string;
-  name: string;
-  apiKey: string;
-  /** The accounts connected to this workspace, from its own channels. */
-  accounts: Array<{ id: string; username: string; platform: string }>;
-}
+/** Rows loaded per board. Filtering happens client-side over this window. */
+const BOARD_LIMIT = 300;
 
-/** Every workspace the caller belongs to that has a Zernio key configured. */
-async function callerWorkspaces(): Promise<WorkspaceWithKey[]> {
+export async function getCommentsBoard(): Promise<CommentsBoard> {
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) return [];
+  if (!user) return { items: [], workspaces: [], accounts: [], lastSyncedAt: null };
 
-  // RLS already scopes this to the caller; the explicit filter keeps the query
-  // honest if the policies are ever loosened.
-  const { data } = await supabase
+  const { data: memberships } = await supabase
     .from("workspace_members")
-    .select("workspaces(id, name, late_api_key_encrypted)")
+    .select("workspaces(id, name)")
     .eq("user_id", user.id);
 
-  const rows = (data ?? []) as unknown as Array<{
-    workspaces: { id: string; name: string; late_api_key_encrypted: string | null } | null;
-  }>;
+  const workspaces = ((memberships ?? []) as unknown as Array<{
+    workspaces: { id: string; name: string } | null;
+  }>)
+    .map((m) => m.workspaces)
+    .filter((w): w is { id: string; name: string } => Boolean(w));
 
-  const workspaces = rows
-    .map((row) => row.workspaces)
-    .filter((ws): ws is NonNullable<typeof ws> => Boolean(ws?.late_api_key_encrypted));
+  if (workspaces.length === 0) {
+    return { items: [], workspaces: [], accounts: [], lastSyncedAt: null };
+  }
 
-  if (workspaces.length === 0) return [];
+  const names = new Map(workspaces.map((w) => [w.id, w.name]));
 
-  // Scope by connected account, not by key. An agency runs every client under
-  // one Zernio account (one profile per client, since a profile holds a single
-  // account per platform), so the same key is on every workspace: asking Zernio
-  // for "all accounts" would hand each workspace every client's comments and
-  // repeat them once per workspace.
-  const { data: channelRows } = await supabase
-    .from("channels")
-    .select("workspace_id, late_account_id, username, platform")
+  // RLS already limits this to the caller's workspaces; the explicit filter
+  // keeps it correct if the policies are ever loosened.
+  const { data: rows } = await supabase
+    .from("comment_logs")
+    .select("*")
     .in(
       "workspace_id",
-      workspaces.map((ws) => ws.id),
-    );
+      workspaces.map((w) => w.id),
+    )
+    .order("comment_created_at", { ascending: false, nullsFirst: false })
+    .limit(BOARD_LIMIT);
 
-  const byWorkspace = new Map<string, WorkspaceWithKey["accounts"]>();
-  for (const channel of (channelRows ?? []) as Array<{
-    workspace_id: string;
-    late_account_id: string;
-    username: string | null;
-    platform: string;
-  }>) {
-    const list = byWorkspace.get(channel.workspace_id) ?? [];
-    list.push({
-      id: channel.late_account_id,
-      username: channel.username ?? channel.late_account_id,
-      platform: channel.platform,
-    });
-    byWorkspace.set(channel.workspace_id, list);
-  }
-
-  return workspaces.map((ws) => ({
-    id: ws.id,
-    name: ws.name,
-    apiKey: ws.late_api_key_encrypted!,
-    accounts: byWorkspace.get(ws.id) ?? [],
-  }));
-}
-
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = [];
-  for (let i = 0; i < items.length; i += limit) {
-    results.push(...(await Promise.all(items.slice(i, i + limit).map(fn))));
-  }
-  return results;
-}
-
-/**
- * One board across every client the caller can see. A workspace that fails
- * (revoked key, Zernio hiccup) is reported in `errors` instead of taking the
- * whole page down with it — with many clients, one broken key is normal.
- */
-export async function getCommentsBoard(): Promise<CommentsBoard> {
-  const workspaces = await callerWorkspaces();
-  const errors: string[] = [];
-  const items: CommentItem[] = [];
-  const accounts = new Map<string, { id: string; username: string; platform: string }>();
-
-  await Promise.all(
-    workspaces.map(async (ws) => {
-      if (ws.accounts.length === 0) return;
-
-      const posts: CommentPost[] = [];
-      for (const account of ws.accounts) {
-        accounts.set(account.id, account);
-        try {
-          const listed = await listCommentPosts(ws.apiKey, {
-            accountId: account.id,
-            limit: POSTS_PER_WORKSPACE,
-          });
-          posts.push(...listed.posts);
-        } catch (e) {
-          errors.push(
-            `${ws.name} / @${account.username}: ${
-              e instanceof Error ? e.message : "could not list posts"
-            }`,
-          );
-        }
-      }
-
-      const withComments = posts.filter((post) => post.commentCount > 0);
-
-      await mapWithConcurrency(withComments, CONCURRENCY, async (post) => {
-        try {
-          const comments = await getPostComments(ws.apiKey, post.id, post.accountId);
-          for (const comment of comments) {
-            // The account's own replies are context, not work to be done.
-            if (comment.from?.isOwner) continue;
-            items.push({
-              comment,
-              post: {
-                id: post.id,
-                permalink: post.permalink,
-                picture: post.picture,
-                content: post.content,
-                platform: post.platform,
-              },
-              accountId: post.accountId,
-              accountUsername: post.accountUsername,
-              workspaceId: ws.id,
-              workspaceName: ws.name,
-            });
-          }
-        } catch (e) {
-          errors.push(
-            `${ws.name} / ${post.accountUsername}: ${
-              e instanceof Error ? e.message : "could not read comments"
-            }`,
-          );
-        }
-      });
+  const items: CommentItem[] = ((rows ?? []) as unknown as Array<Record<string, unknown>>).map(
+    (r) => ({
+      id: String(r.id),
+      commentId: String(r.platform_comment_id),
+      text: String(r.comment_text ?? ""),
+      createdAt: (r.comment_created_at as string) ?? (r.created_at as string) ?? null,
+      authorName: (r.author_name as string) ?? null,
+      authorUsername: (r.author_username as string) ?? null,
+      replyCount: Number(r.reply_count ?? 0),
+      isHidden: Boolean(r.is_hidden),
+      canReply: r.can_reply === undefined ? true : Boolean(r.can_reply),
+      canHide: r.can_hide === undefined ? true : Boolean(r.can_hide),
+      postId: String(r.post_id ?? ""),
+      postPermalink: (r.post_permalink as string) ?? null,
+      postPicture: (r.post_picture as string) ?? null,
+      postContent: (r.post_content as string) ?? null,
+      platform: (r.platform as string) ?? "instagram",
+      source: (r.source as string) === "ad" ? "ad" : "organic",
+      accountId: (r.account_id as string) ?? null,
+      accountUsername: (r.account_username as string) ?? null,
+      workspaceId: String(r.workspace_id),
+      workspaceName: names.get(String(r.workspace_id)) ?? "",
     }),
   );
 
-  items.sort(
-    (a, b) =>
-      new Date(b.comment.createdTime).getTime() - new Date(a.comment.createdTime).getTime(),
-  );
+  const accounts = new Map<string, { id: string; username: string; platform: string }>();
+  for (const item of items) {
+    if (item.accountId) {
+      accounts.set(item.accountId, {
+        id: item.accountId,
+        username: item.accountUsername ?? item.accountId,
+        platform: item.platform,
+      });
+    }
+  }
+
+  const syncs = ((rows ?? []) as unknown as Array<{ synced_at?: string | null }>)
+    .map((r) => r.synced_at)
+    .filter((s): s is string => Boolean(s))
+    .sort();
 
   return {
     items,
-    workspaces: workspaces.map((ws) => ({ id: ws.id, name: ws.name })),
+    workspaces,
     accounts: [...accounts.values()].sort((a, b) => a.username.localeCompare(b.username)),
-    errors,
+    lastSyncedAt: syncs.length ? syncs[syncs.length - 1] : null,
   };
 }
 
-/** Re-checks membership before using a workspace's key: the workspace id comes
- *  from the client, so it cannot be trusted on its own. */
-async function keyForWorkspace(workspaceId: string): Promise<string | null> {
-  const workspaces = await callerWorkspaces();
-  return workspaces.find((ws) => ws.id === workspaceId)?.apiKey ?? null;
+/** Membership check plus the workspace's key, for the write paths. Never trust
+ *  the workspace id that arrives from the client. */
+async function workspaceKey(workspaceId: string): Promise<string | null> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return null;
+
+  const { data: membership } = await supabase
+    .from("workspace_members")
+    .select("workspace_id, workspaces(late_api_key_encrypted)")
+    .eq("user_id", user.id)
+    .eq("workspace_id", workspaceId)
+    .single();
+
+  const ws = (membership as unknown as {
+    workspaces?: { late_api_key_encrypted?: string | null };
+  } | null)?.workspaces;
+
+  return ws?.late_api_key_encrypted ?? null;
+}
+
+async function markRow(commentRowId: string, patch: Record<string, unknown>) {
+  const supabase = await createClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  await (supabase.from("comment_logs") as any).update(patch).eq("id", commentRowId);
 }
 
 export async function replyToCommentAction(input: {
+  rowId: string;
   workspaceId: string;
   postId: string;
   commentId: string;
@@ -213,7 +178,7 @@ export async function replyToCommentAction(input: {
   const message = input.message.trim();
   if (!message) return { error: "Write something first" };
 
-  const apiKey = await keyForWorkspace(input.workspaceId);
+  const apiKey = await workspaceKey(input.workspaceId);
   if (!apiKey) return { error: "No access to this workspace" };
 
   try {
@@ -222,6 +187,8 @@ export async function replyToCommentAction(input: {
       message,
       commentId: input.commentId,
     });
+    // Reflect it now; the next sweep replaces this with Zernio's own count.
+    await markRow(input.rowId, { reply_count: 1, reply_sent: true });
     return { ok: true };
   } catch (e) {
     return { error: e instanceof Error ? e.message : "Reply failed" };
@@ -229,6 +196,7 @@ export async function replyToCommentAction(input: {
 }
 
 export async function privateReplyAction(input: {
+  rowId: string;
   workspaceId: string;
   postId: string;
   commentId: string;
@@ -238,7 +206,7 @@ export async function privateReplyAction(input: {
   const message = input.message.trim();
   if (!message) return { error: "Write something first" };
 
-  const apiKey = await keyForWorkspace(input.workspaceId);
+  const apiKey = await workspaceKey(input.workspaceId);
   if (!apiKey) return { error: "No access to this workspace" };
 
   try {
@@ -246,6 +214,7 @@ export async function privateReplyAction(input: {
       accountId: input.accountId,
       message,
     });
+    await markRow(input.rowId, { dm_sent: true });
     return { ok: true };
   } catch (e) {
     return { error: e instanceof Error ? e.message : "Private reply failed" };
@@ -253,17 +222,19 @@ export async function privateReplyAction(input: {
 }
 
 export async function toggleHiddenAction(input: {
+  rowId: string;
   workspaceId: string;
   postId: string;
   commentId: string;
   accountId: string;
   hidden: boolean;
 }) {
-  const apiKey = await keyForWorkspace(input.workspaceId);
+  const apiKey = await workspaceKey(input.workspaceId);
   if (!apiKey) return { error: "No access to this workspace" };
 
   try {
     await setCommentHidden(apiKey, input.postId, input.commentId, input.accountId, input.hidden);
+    await markRow(input.rowId, { is_hidden: input.hidden });
     return { ok: true };
   } catch (e) {
     return { error: e instanceof Error ? e.message : "Could not change visibility" };
