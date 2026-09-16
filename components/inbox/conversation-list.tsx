@@ -9,6 +9,10 @@ import type { Database, Platform, ConversationStatus } from "@/lib/types/databas
 
 type Conversation = Database["public"]["Tables"]["conversations"]["Row"] & {
   contacts: Database["public"]["Tables"]["contacts"]["Row"] | null;
+  // Which connected account the conversation came into. With more than one
+  // account on the same platform, two rows can show the same contact name and
+  // be different conversations entirely.
+  channels?: { username: string | null } | null;
 };
 
 function formatTime(dateStr: string | null): string {
@@ -84,7 +88,7 @@ export function ConversationList({
             // Fetch full conversation with contact
             const { data } = await supabase
               .from("conversations")
-              .select("*, contacts(*)")
+              .select("*, contacts(*), channels(username)")
               .eq("id", inserted.id)
               .single();
             if (data) {
@@ -197,6 +201,11 @@ export function ConversationList({
                 <div className="flex items-center justify-between">
                   <p className="truncate text-sm font-medium">
                     {conversation.contacts?.display_name ?? "Unknown"}
+                    {conversation.channels?.username && (
+                      <span className="ml-1.5 font-normal text-[11px] text-muted-foreground">
+                        @{conversation.channels.username}
+                      </span>
+                    )}
                   </p>
                   <span
                     suppressHydrationWarning
