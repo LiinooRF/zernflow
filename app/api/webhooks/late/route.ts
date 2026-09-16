@@ -8,6 +8,7 @@ import { upsertContactForSender } from "@/lib/inbox-sync";
 import { processComment } from "@/lib/comment-processor";
 import type { Database } from "@/lib/types/database";
 import { messagePreview } from "@/lib/message-preview";
+import { isOutbound } from "@/lib/message-direction";
 
 // ── Zernio API webhook payload ───────────────────────────────────────────────
 
@@ -137,8 +138,10 @@ async function handleWebhook(request: NextRequest) {
 
   const { message: msg, account } = payload;
 
-  // Ignore outbound messages (sent by the bot itself) to prevent loops
-  if (msg.direction === "outbound") {
+  // Ignore outbound messages (sent by the bot itself) to prevent loops.
+  // Zernio says "outgoing", never "outbound", so this guard never fired and
+  // the account's own replies were processed as if a contact had sent them.
+  if (isOutbound(msg.direction)) {
     return NextResponse.json({ ok: true, skipped: true });
   }
 

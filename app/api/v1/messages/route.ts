@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createZernioClient } from "@/lib/zernio-client";
+import { normalizeDirection } from "@/lib/message-direction";
 import { messagePreview } from "@/lib/message-preview";
 
 /**
@@ -64,7 +65,7 @@ export async function GET(request: NextRequest) {
     const messages = zernioMessages.map((m: any) => ({
       id: m.id,
       conversation_id: conversationId,
-      direction: m.direction === "outbound" ? "outbound" : "inbound",
+      direction: normalizeDirection(m.direction),
       text: m.text ?? m.message ?? null,
       attachments: m.attachments?.length ? m.attachments : null,
       quick_reply_payload: null,
