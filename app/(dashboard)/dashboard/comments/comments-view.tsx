@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
+import { createClient } from "@/lib/supabase/client";
 import {
   AlertTriangle,
   EyeOff,
@@ -39,12 +40,64 @@ function timeAgo(iso: string) {
   return `${Math.floor(hours / 24)}d`;
 }
 
+/**
+ * Zernio serves this data from a cache and rate-limits to 60 requests/minute
+ * per key, and one board refresh costs one request per workspace plus one per
+ * post that has comments. Polling every few seconds would burn the budget on
+ * identical bytes, so the fast path is the push below and this is only the
+ * safety net for anything the webhook misses.
+ */
+const POLL_MS = 60_000;
+/** New comments usually arrive in bursts; refetch once when the burst settles. */
+const PUSH_DEBOUNCE_MS = 3_000;
+
 export function CommentsView({ items, workspaces, accounts, errors }: Props) {
   const router = useRouter();
   const [workspaceFilter, setWorkspaceFilter] = useState("all");
   const [accountFilter, setAccountFilter] = useState("all");
   const [onlyUnanswered, setOnlyUnanswered] = useState(true);
   const [refreshing, startRefresh] = useTransition();
+  const [live, setLive] = useState(false);
+  const [pushed, setPushed] = useState(0);
+
+  const refresh = useCallback(() => {
+    setPushed(0);
+    startRefresh(() => router.refresh());
+  }, [router]);
+
+  // Push: Zernio's comment.received webhook writes into comment_logs, which is
+  // in the supabase_realtime publication, so a new comment reaches the browser
+  // as it lands instead of on the next poll.
+  const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const supabase = createClient();
+    const channel = supabase
+      .channel("comments-board")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "comment_logs" },
+        () => {
+          setPushed((n) => n + 1);
+          if (debounce.current) clearTimeout(debounce.current);
+          debounce.current = setTimeout(() => router.refresh(), PUSH_DEBOUNCE_MS);
+        },
+      )
+      .subscribe((status) => setLive(status === "SUBSCRIBED"));
+
+    return () => {
+      if (debounce.current) clearTimeout(debounce.current);
+      supabase.removeChannel(channel);
+    };
+  }, [router]);
+
+  // Safety net. Paused while the tab is hidden so a forgotten tab does not eat
+  // the rate limit all afternoon.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") router.refresh();
+    }, POLL_MS);
+    return () => clearInterval(timer);
+  }, [router]);
 
   const visible = useMemo(
     () =>
@@ -68,14 +121,39 @@ export function CommentsView({ items, workspaces, accounts, errors }: Props) {
             Every comment across all your clients&apos; accounts, newest first.
           </p>
         </div>
-        <button
-          onClick={() => startRefresh(() => router.refresh())}
-          disabled={refreshing}
-          className="inline-flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm font-medium hover:bg-muted disabled:opacity-50"
-        >
-          <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-3">
+          <span
+            className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
+            title={
+              live
+                ? "New comments arrive as Zernio pushes them"
+                : "Live updates unavailable - falling back to a refresh every minute"
+            }
+          >
+            <span
+              className={`h-2 w-2 rounded-full ${live ? "bg-green-500" : "bg-muted-foreground/40"}`}
+            />
+            {live ? "Live" : "Polling"}
+          </span>
+
+          {pushed > 0 && (
+            <button
+              onClick={refresh}
+              className="rounded-full bg-green-100 px-2.5 py-1 text-xs font-medium text-green-700"
+            >
+              {pushed} new — show
+            </button>
+          )}
+
+          <button
+            onClick={refresh}
+            disabled={refreshing}
+            className="inline-flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm font-medium hover:bg-muted disabled:opacity-50"
+          >
+            <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       <div className="mt-4 flex flex-wrap items-center gap-3">

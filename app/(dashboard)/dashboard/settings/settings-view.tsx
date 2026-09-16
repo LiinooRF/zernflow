@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
+import { syncWebhookAction } from "@/lib/actions/webhook";
 
 interface WorkspaceSettings {
   id: string;
@@ -142,6 +143,14 @@ export function SettingsView({
       if (updateError) {
         console.error("Settings save error:", updateError);
         throw new Error(updateError.message);
+      }
+
+      // A key without a registered webhook means no inbound DMs and no
+      // comment.received, so register it here rather than leaving the
+      // workspace silently deaf.
+      if (update.late_api_key_encrypted) {
+        const hook = await syncWebhookAction(workspace.id);
+        if (hook.error) setError(`Settings saved, but Zernio webhook failed: ${hook.error}`);
       }
 
       setSaved(true);

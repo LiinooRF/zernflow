@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createZernioClient } from "@/lib/zernio-client";
 import { PLATFORMS, isSupportedPlatform } from "@/lib/platforms";
+import { getOrCreateWorkspaceProfile } from "@/lib/zernio-profile";
 
 async function getWorkspace(supabase: Awaited<ReturnType<typeof createClient>>) {
   const {
@@ -52,17 +53,14 @@ export async function POST(request: NextRequest) {
   const zernio = createZernioClient(workspace.late_api_key_encrypted);
 
   try {
-    // Get profile ID (required by Zernio's connect endpoint)
-    const profilesRes = await zernio.profiles.listProfiles();
-    const profiles = profilesRes.data?.profiles ?? [];
-    if (profiles.length === 0) {
-      return NextResponse.json(
-        { error: "No Zernio profiles found. Create one in your Zernio dashboard first." },
-        { status: 400 }
-      );
-    }
-
-    const profileId = profiles[0]._id!;
+    // This workspace's own profile, created on first use. Always connecting
+    // into profiles[0] meant a second workspace connecting the same platform
+    // replaced the first workspace's account, taking its inbox and DM history
+    // with it: a Zernio profile holds one account per platform.
+    const profileId = await getOrCreateWorkspaceProfile(zernio, {
+      id: workspace.id,
+      name: workspace.name,
+    });
     const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
     const callbackUrl = `${appUrl}/dashboard/channels/callback`;
 

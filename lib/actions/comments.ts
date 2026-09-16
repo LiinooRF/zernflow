@@ -38,6 +38,8 @@ interface WorkspaceWithKey {
   id: string;
   name: string;
   apiKey: string;
+  /** The accounts connected to this workspace, from its own channels. */
+  accounts: Array<{ id: string; username: string; platform: string }>;
 }
 
 /** Every workspace the caller belongs to that has a Zernio key configured. */
@@ -59,10 +61,47 @@ async function callerWorkspaces(): Promise<WorkspaceWithKey[]> {
     workspaces: { id: string; name: string; late_api_key_encrypted: string | null } | null;
   }>;
 
-  return rows
+  const workspaces = rows
     .map((row) => row.workspaces)
-    .filter((ws): ws is NonNullable<typeof ws> => Boolean(ws?.late_api_key_encrypted))
-    .map((ws) => ({ id: ws.id, name: ws.name, apiKey: ws.late_api_key_encrypted! }));
+    .filter((ws): ws is NonNullable<typeof ws> => Boolean(ws?.late_api_key_encrypted));
+
+  if (workspaces.length === 0) return [];
+
+  // Scope by connected account, not by key. An agency runs every client under
+  // one Zernio account (one profile per client, since a profile holds a single
+  // account per platform), so the same key is on every workspace: asking Zernio
+  // for "all accounts" would hand each workspace every client's comments and
+  // repeat them once per workspace.
+  const { data: channelRows } = await supabase
+    .from("channels")
+    .select("workspace_id, late_account_id, username, platform")
+    .in(
+      "workspace_id",
+      workspaces.map((ws) => ws.id),
+    );
+
+  const byWorkspace = new Map<string, WorkspaceWithKey["accounts"]>();
+  for (const channel of (channelRows ?? []) as Array<{
+    workspace_id: string;
+    late_account_id: string;
+    username: string | null;
+    platform: string;
+  }>) {
+    const list = byWorkspace.get(channel.workspace_id) ?? [];
+    list.push({
+      id: channel.late_account_id,
+      username: channel.username ?? channel.late_account_id,
+      platform: channel.platform,
+    });
+    byWorkspace.set(channel.workspace_id, list);
+  }
+
+  return workspaces.map((ws) => ({
+    id: ws.id,
+    name: ws.name,
+    apiKey: ws.late_api_key_encrypted!,
+    accounts: byWorkspace.get(ws.id) ?? [],
+  }));
 }
 
 async function mapWithConcurrency<T, R>(
@@ -90,24 +129,24 @@ export async function getCommentsBoard(): Promise<CommentsBoard> {
 
   await Promise.all(
     workspaces.map(async (ws) => {
-      let posts: CommentPost[];
-      try {
-        const listed = await listCommentPosts(ws.apiKey, { limit: POSTS_PER_WORKSPACE });
-        posts = listed.posts;
-        if (listed.accountsFailed > 0) {
-          errors.push(`${ws.name}: Zernio could not read ${listed.accountsFailed} account(s)`);
-        }
-      } catch (e) {
-        errors.push(`${ws.name}: ${e instanceof Error ? e.message : "could not list posts"}`);
-        return;
-      }
+      if (ws.accounts.length === 0) return;
 
-      for (const post of posts) {
-        accounts.set(post.accountId, {
-          id: post.accountId,
-          username: post.accountUsername,
-          platform: post.platform,
-        });
+      const posts: CommentPost[] = [];
+      for (const account of ws.accounts) {
+        accounts.set(account.id, account);
+        try {
+          const listed = await listCommentPosts(ws.apiKey, {
+            accountId: account.id,
+            limit: POSTS_PER_WORKSPACE,
+          });
+          posts.push(...listed.posts);
+        } catch (e) {
+          errors.push(
+            `${ws.name} / @${account.username}: ${
+              e instanceof Error ? e.message : "could not list posts"
+            }`,
+          );
+        }
       }
 
       const withComments = posts.filter((post) => post.commentCount > 0);
