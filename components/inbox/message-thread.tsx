@@ -124,6 +124,9 @@ export function MessageThread({
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  // "Failed" on its own is undebuggable: Meta's 24-hour window, a revoked
+  // token and a malformed request all looked identical. Keep the reason.
+  const [sendError, setSendError] = useState<string | null>(null);
   const [statusUpdating, setStatusUpdating] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -227,6 +230,7 @@ export function MessageThread({
       status: "pending",
       created_at: new Date().toISOString(),
     };
+    setSendError(null);
     setMessages((prev) => [...prev, optimisticMessage]);
 
     try {
@@ -249,6 +253,7 @@ export function MessageThread({
       );
     } catch (err) {
       console.error("Failed to send message:", err);
+      setSendError(err instanceof Error ? err.message : String(err));
       // Mark optimistic message as failed
       setMessages((prev) =>
         prev.map((m) =>
@@ -385,6 +390,11 @@ export function MessageThread({
 
       {/* Composer */}
       <div className="border-t border-border p-4">
+        {sendError && (
+          <div className="mx-auto mb-2 max-w-2xl rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700">
+            {sendError}
+          </div>
+        )}
         <div className="mx-auto flex max-w-2xl items-end gap-2">
           <div className="flex-1">
             <textarea

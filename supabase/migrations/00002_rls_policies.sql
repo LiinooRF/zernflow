@@ -184,7 +184,6 @@ create policy "Users can view contact custom fields"
   using (
     exists (
       select 1 from contacts c
-      join contact_custom_fields ccf on ccf.contact_id = c.id
       where c.id = contact_custom_fields.contact_id
         and is_workspace_member(c.workspace_id)
     )
