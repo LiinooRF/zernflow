@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createZernioClient } from "@/lib/zernio-client";
 import { PLATFORMS, isSupportedPlatform } from "@/lib/platforms";
-import { getOrCreateWorkspaceProfile } from "@/lib/zernio-profile";
+import { pickProfileForPlatform } from "@/lib/zernio-profile";
 
 async function getWorkspace(supabase: Awaited<ReturnType<typeof createClient>>) {
   const {
@@ -53,14 +53,15 @@ export async function POST(request: NextRequest) {
   const zernio = createZernioClient(workspace.late_api_key_encrypted);
 
   try {
-    // This workspace's own profile, created on first use. Always connecting
-    // into profiles[0] meant a second workspace connecting the same platform
-    // replaced the first workspace's account, taking its inbox and DM history
-    // with it: a Zernio profile holds one account per platform.
-    const profileId = await getOrCreateWorkspaceProfile(zernio, {
-      id: workspace.id,
-      name: workspace.name,
-    });
+    // A profile whose slot for this platform is still free, creating one when
+    // they are all taken. Connecting into an occupied slot does not add the
+    // account: it replaces the one already there and deletes its inbox, DM
+    // history and analytics.
+    const { profileId } = await pickProfileForPlatform(
+      workspace.late_api_key_encrypted,
+      { id: workspace.id, name: workspace.name },
+      platform,
+    );
     const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
     const callbackUrl = `${appUrl}/dashboard/channels/callback`;
 

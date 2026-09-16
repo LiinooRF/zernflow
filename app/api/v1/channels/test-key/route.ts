@@ -7,6 +7,7 @@ import {
 } from "@/lib/zernio-webhook";
 import { backfillInboxConversations } from "@/lib/inbox-sync";
 import { isSupportedPlatform } from "@/lib/platforms";
+import { accountProfileId, workspaceProfileIds } from "@/lib/zernio-profile";
 
 /**
  * POST /api/v1/channels/test-key
@@ -41,11 +42,11 @@ export async function POST(request: NextRequest) {
     const supabase = await createClient();
 
     // Save the API key
-    const { error: saveErr } = await supabase
+    const { data: savedWorkspace, error: saveErr } = await supabase
       .from("workspaces")
       .update({ late_api_key_encrypted: apiKey.trim() })
       .eq("id", workspaceId)
-      .select("id")
+      .select("id, name")
       .single();
 
     if (saveErr) {
@@ -81,10 +82,28 @@ export async function POST(request: NextRequest) {
       (existingChannels ?? []).map((c) => [c.late_account_id, c])
     );
 
+    // Only this workspace's own accounts. The key can hold every client of an
+    // agency, so importing all of them here would give each client the others'
+    // channels. An empty set means nothing has been connected for this
+    // workspace yet, and nothing should be imported.
+    let ownProfiles = new Set<string>();
+    try {
+      ownProfiles = await workspaceProfileIds(apiKey.trim(), {
+        id: workspaceId,
+        name: (savedWorkspace as { name?: string } | null)?.name || "Workspace",
+      });
+    } catch (err) {
+      console.error("[test-key] could not resolve workspace profiles:", err);
+    }
+
     for (const account of accounts) {
       if (!account._id) continue;
       if (existingByLateId.has(account._id)) continue;
       if (!isSupportedPlatform(account.platform)) continue;
+      if (ownProfiles.size > 0) {
+        const profile = accountProfileId(account as { profileId?: unknown });
+        if (!profile || !ownProfiles.has(profile)) continue;
+      }
 
       const { error: insertErr } = await supabase.from("channels").insert({
         workspace_id: workspaceId,
