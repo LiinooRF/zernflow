@@ -6,6 +6,7 @@ import { useSyncExternalStore } from "react";
 import {
   GitBranch,
   MessageSquare,
+  MessagesSquare,
   Users,
   Radio,
   ListOrdered,
@@ -41,6 +42,7 @@ function subscribeToThemeClass(callback: () => void) {
 const navigation = [
   { name: "Flows", href: "/dashboard/flows", icon: GitBranch },
   { name: "Inbox", href: "/dashboard/inbox", icon: MessageSquare },
+  { name: "Comments", href: "/dashboard/comments", icon: MessagesSquare },
   { name: "Contacts", href: "/dashboard/contacts", icon: Users },
   { name: "Broadcasts", href: "/dashboard/broadcasts", icon: Radio },
   { name: "Sequences", href: "/dashboard/sequences", icon: ListOrdered },
