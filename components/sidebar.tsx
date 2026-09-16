@@ -7,6 +7,7 @@ import {
   GitBranch,
   MessageSquare,
   MessagesSquare,
+  Inbox,
   Users,
   Radio,
   ListOrdered,
@@ -42,6 +43,7 @@ function subscribeToThemeClass(callback: () => void) {
 const navigation = [
   { name: "Flows", href: "/dashboard/flows", icon: GitBranch },
   { name: "Inbox", href: "/dashboard/inbox", icon: MessageSquare },
+  { name: "All inbox", href: "/dashboard/all-inbox", icon: Inbox },
   { name: "Comments", href: "/dashboard/comments", icon: MessagesSquare },
   { name: "Contacts", href: "/dashboard/contacts", icon: Users },
   { name: "Broadcasts", href: "/dashboard/broadcasts", icon: Radio },
