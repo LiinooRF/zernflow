@@ -108,7 +108,10 @@ export function CommentsView({ items, workspaces, accounts, lastSyncedAt }: Prop
     );
 
   return (
-    <div className="p-6">
+    // The dashboard layout is overflow-hidden, so every screen brings its own
+    // scroll container: fixed header, scrollable list.
+    <div className="flex h-full flex-col">
+      <div className="shrink-0 border-b border-border p-6 pb-4">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold">Comments</h1>
@@ -212,6 +215,9 @@ export function CommentsView({ items, workspaces, accounts, lastSyncedAt }: Prop
         </span>
       </div>
 
+      </div>
+
+      <div className="flex-1 overflow-auto p-6">
       {visible.length === 0 ? (
         <div className="mt-8 rounded-xl border border-dashed border-border p-10 text-center">
           <MessageSquare className="mx-auto h-8 w-8 text-muted-foreground/50" />
@@ -229,6 +235,7 @@ export function CommentsView({ items, workspaces, accounts, lastSyncedAt }: Prop
           ))}
         </div>
       )}
+      </div>
     </div>
   );
 }

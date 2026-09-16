@@ -83,7 +83,10 @@ export function AllInboxView({ threads, workspaces, accounts }: Props) {
     );
 
   return (
-    <div className="p-6">
+    // The dashboard layout is overflow-hidden, so every screen brings its own
+    // scroll container: fixed header, scrollable list.
+    <div className="flex h-full flex-col">
+      <div className="shrink-0 border-b border-border p-6 pb-4">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold">All inbox</h1>
@@ -157,6 +160,9 @@ export function AllInboxView({ threads, workspaces, accounts }: Props) {
         <span className="ml-auto text-sm text-muted-foreground">{visible.length} shown</span>
       </div>
 
+      </div>
+
+      <div className="flex-1 overflow-auto p-6">
       {visible.length === 0 ? (
         <div className="mt-8 rounded-xl border border-dashed border-border p-10 text-center">
           <Inbox className="mx-auto h-8 w-8 text-muted-foreground/50" />
@@ -174,6 +180,7 @@ export function AllInboxView({ threads, workspaces, accounts }: Props) {
           ))}
         </div>
       )}
+      </div>
     </div>
   );
 }
