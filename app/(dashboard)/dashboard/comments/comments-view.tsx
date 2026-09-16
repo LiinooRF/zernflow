@@ -32,9 +32,11 @@ function timeAgo(iso: string | null) {
   return `${Math.floor(hours / 24)}d`;
 }
 
-/** The board reads Postgres now, so refreshing is cheap; this is just a floor
- *  under the live subscription in case the socket drops. */
-const POLL_MS = 60_000;
+/** The board reads Postgres, not Zernio, so a refresh is a local query and
+ *  costs nothing against the API rate limit. Ten seconds keeps it visibly live
+ *  even if the realtime socket drops. The Zernio sweep stays at 10 minutes -
+ *  that is the call that actually costs quota. */
+const POLL_MS = 10_000;
 /** Comments arrive in bursts; re-read once the burst settles. */
 const PUSH_DEBOUNCE_MS = 2_000;
 
@@ -89,7 +91,7 @@ export function CommentsView({ items, workspaces, accounts, lastSyncedAt }: Prop
     () =>
       items.filter((item) => {
         if (workspaceFilter !== "all" && item.workspaceId !== workspaceFilter) return false;
-        if (accountFilter !== "all" && item.accountId !== accountFilter) return false;
+        if (accountFilter !== "all" && item.channelId !== accountFilter) return false;
         if (sourceFilter !== "all" && item.source !== sourceFilter) return false;
         if (onlyUnanswered && item.replyCount > 0) return false;
         return true;

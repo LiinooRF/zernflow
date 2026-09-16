@@ -14,7 +14,8 @@ interface Props {
   accounts: Array<{ id: string; username: string; platform: string }>;
 }
 
-const POLL_MS = 60_000;
+/** Reads Postgres only, so ten seconds is cheap and keeps it visibly live. */
+const POLL_MS = 10_000;
 const PUSH_DEBOUNCE_MS = 1_500;
 
 function timeAgo(iso: string | null) {
@@ -67,7 +68,7 @@ export function AllInboxView({ threads, workspaces, accounts }: Props) {
     () =>
       threads.filter((t) => {
         if (workspaceFilter !== "all" && t.workspaceId !== workspaceFilter) return false;
-        if (accountFilter !== "all" && t.accountUsername !== accountFilter) return false;
+        if (accountFilter !== "all" && t.channelId !== accountFilter) return false;
         if (onlyUnread && t.unreadCount === 0) return false;
         return true;
       }),
@@ -141,7 +142,7 @@ export function AllInboxView({ threads, workspaces, accounts }: Props) {
         >
           <option value="all">All accounts ({accounts.length})</option>
           {accounts.map((a) => (
-            <option key={a.id} value={a.username}>
+            <option key={a.id} value={a.id}>
               @{a.username} · {a.platform}
             </option>
           ))}
@@ -185,6 +186,13 @@ export function AllInboxView({ threads, workspaces, accounts }: Props) {
   );
 }
 
+interface ThreadMessage {
+  id: string;
+  direction: "inbound" | "outbound";
+  text: string | null;
+  created_at: string;
+}
+
 function ThreadRow({ thread }: { thread: InboxThread }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -192,6 +200,27 @@ function ThreadRow({ thread }: { thread: InboxThread }) {
   const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
   const [sending, setSending] = useState(false);
+  const [history, setHistory] = useState<ThreadMessage[] | null>(null);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+
+  // Replying to a preview line is replying blind: you cannot see what was
+  // asked, or what was already answered. Opening a row pulls the thread.
+  async function toggle() {
+    const next = !open;
+    setOpen(next);
+    if (!next || history || loadingHistory) return;
+    setLoadingHistory(true);
+    try {
+      const res = await fetch(`/api/v1/messages?conversationId=${thread.id}`);
+      const data = await res.json();
+      setHistory(Array.isArray(data) ? data : []);
+      if (!Array.isArray(data) && data?.error) setError(data.error);
+    } catch {
+      setError("Could not load the conversation");
+    } finally {
+      setLoadingHistory(false);
+    }
+  }
 
   async function send() {
     if (!message.trim() || sending) return;
@@ -212,7 +241,11 @@ function ThreadRow({ thread }: { thread: InboxThread }) {
       }
       setSent(true);
       setMessage("");
-      setOpen(false);
+      setHistory(null);
+      // Pull the thread again so the reply you just sent is visible.
+      const again = await fetch(`/api/v1/messages?conversationId=${thread.id}`);
+      const fresh = await again.json();
+      setHistory(Array.isArray(fresh) ? fresh : []);
       router.refresh();
     } catch {
       setError("Could not reach the server");
@@ -243,9 +276,10 @@ function ThreadRow({ thread }: { thread: InboxThread }) {
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <PlatformIcon platform={thread.platform} className="h-3.5 w-3.5" />
             <span className="font-medium text-foreground">{thread.contactName}</span>
-            {thread.accountUsername && <span>→ @{thread.accountUsername}</span>}
-            <span>·</span>
-            <span>{thread.workspaceName}</span>
+            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-foreground">
+              {thread.workspaceName}
+              {thread.accountUsername ? ` · @${thread.accountUsername}` : ""}
+            </span>
             <span>·</span>
             <span>{timeAgo(thread.lastMessageAt)}</span>
             {thread.unreadCount > 0 && (
@@ -266,17 +300,42 @@ function ThreadRow({ thread }: { thread: InboxThread }) {
 
           <div className="mt-2 flex items-center gap-2">
             <button
-              onClick={() => setOpen(!open)}
+              onClick={toggle}
               className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-muted"
             >
               <Send className="h-3.5 w-3.5" />
-              Reply
+              {open ? "Close" : "Open & reply"}
             </button>
             {sent && <span className="text-xs font-medium text-green-700">Sent</span>}
           </div>
 
           {open && (
-            <div className="mt-2">
+            <div className="mt-3">
+              {loadingHistory && (
+                <p className="text-xs text-muted-foreground">Loading conversation...</p>
+              )}
+              {history && history.length > 0 && (
+                <div className="mb-3 max-h-64 space-y-2 overflow-auto rounded-lg border border-border bg-muted/30 p-3">
+                  {history.map((m) => (
+                    <div
+                      key={m.id}
+                      className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
+                        m.direction === "outbound"
+                          ? "ml-auto bg-foreground text-background"
+                          : "bg-background border border-border"
+                      }`}
+                    >
+                      {m.text || <span className="opacity-60">(attachment)</span>}
+                      <div className="mt-1 text-[10px] opacity-60">{timeAgo(m.created_at)}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {history && history.length === 0 && !loadingHistory && (
+                <p className="mb-2 text-xs text-muted-foreground">
+                  No messages returned for this conversation.
+                </p>
+              )}
               <textarea
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}

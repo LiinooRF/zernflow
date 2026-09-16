@@ -14,6 +14,9 @@ import { createClient } from "@/lib/supabase/server";
 
 export interface InboxThread {
   id: string;
+  /** Unambiguous account identity: a Zernio account slot can be re-linked and
+   *  carry two usernames over its life, so filter by channel, not by name. */
+  channelId: string;
   workspaceId: string;
   workspaceName: string;
   platform: string;
@@ -60,7 +63,7 @@ export async function getUnifiedInbox(): Promise<UnifiedInbox> {
   const { data: rows } = await supabase
     .from("conversations")
     .select(
-      "id, workspace_id, platform, status, unread_count, last_message_preview, last_message_at, assigned_to, contacts(display_name, avatar_url), channels(late_account_id, username)",
+      "id, workspace_id, channel_id, platform, status, unread_count, last_message_preview, last_message_at, assigned_to, contacts(display_name, avatar_url), channels(late_account_id, username)",
     )
     .in(
       "workspace_id",
@@ -74,6 +77,7 @@ export async function getUnifiedInbox(): Promise<UnifiedInbox> {
   const threads: InboxThread[] = ((rows ?? []) as unknown as Array<{
     id: string;
     workspace_id: string;
+    channel_id: string;
     platform: string;
     status: string;
     unread_count: number;
@@ -84,14 +88,15 @@ export async function getUnifiedInbox(): Promise<UnifiedInbox> {
     channels: { late_account_id: string; username: string | null } | null;
   }>).map((r) => {
     if (r.channels?.late_account_id) {
-      accounts.set(r.channels.late_account_id, {
-        id: r.channels.late_account_id,
+      accounts.set(r.channel_id, {
+        id: r.channel_id,
         username: r.channels.username ?? r.channels.late_account_id,
         platform: r.platform,
       });
     }
     return {
       id: r.id,
+      channelId: r.channel_id,
       workspaceId: r.workspace_id,
       workspaceName: names.get(r.workspace_id) ?? "",
       platform: r.platform,

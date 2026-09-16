@@ -20,6 +20,10 @@ import {
 
 export interface CommentItem {
   id: string;
+  /** The channel this belongs to. Unlike the Zernio account id, it is
+   *  unambiguous: a re-linked account slot can carry two different usernames
+   *  over its lifetime, which made an account-id filter mix two real accounts. */
+  channelId: string;
   commentId: string;
   text: string;
   createdAt: string | null;
@@ -92,6 +96,7 @@ export async function getCommentsBoard(): Promise<CommentsBoard> {
   const items: CommentItem[] = ((rows ?? []) as unknown as Array<Record<string, unknown>>).map(
     (r) => ({
       id: String(r.id),
+      channelId: String(r.channel_id),
       commentId: String(r.platform_comment_id),
       text: String(r.comment_text ?? ""),
       createdAt: (r.comment_created_at as string) ?? (r.created_at as string) ?? null,
@@ -114,16 +119,25 @@ export async function getCommentsBoard(): Promise<CommentsBoard> {
     }),
   );
 
-  const accounts = new Map<string, { id: string; username: string; platform: string }>();
-  for (const item of items) {
-    if (item.accountId) {
-      accounts.set(item.accountId, {
-        id: item.accountId,
-        username: item.accountUsername ?? item.accountId,
-        platform: item.platform,
-      });
-    }
-  }
+  // Built from channels, the source of truth for which accounts exist today.
+  // Deriving it from the rows themselves surfaced stale usernames left behind
+  // by a re-linked account slot.
+  const { data: channelRows } = await supabase
+    .from("channels")
+    .select("id, username, platform, is_active")
+    .in(
+      "workspace_id",
+      workspaces.map((w) => w.id),
+    );
+
+  const accounts = ((channelRows ?? []) as unknown as Array<{
+    id: string;
+    username: string | null;
+    platform: string;
+    is_active: boolean;
+  }>)
+    .filter((c) => c.is_active)
+    .map((c) => ({ id: c.id, username: c.username ?? c.id, platform: c.platform }));
 
   const syncs = ((rows ?? []) as unknown as Array<{ synced_at?: string | null }>)
     .map((r) => r.synced_at)
@@ -133,7 +147,7 @@ export async function getCommentsBoard(): Promise<CommentsBoard> {
   return {
     items,
     workspaces,
-    accounts: [...accounts.values()].sort((a, b) => a.username.localeCompare(b.username)),
+    accounts: accounts.sort((a, b) => a.username.localeCompare(b.username)),
     lastSyncedAt: syncs.length ? syncs[syncs.length - 1] : null,
   };
 }
